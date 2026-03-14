@@ -1,0 +1,17 @@
+services:
+  musicme-bridge:
+    build: .
+    container_name: musicme-subsonic-bridge
+    restart: unless-stopped
+    ports:
+      - "4533:4533"
+    environment:
+      # MusicMe credentials
+      MUSICME_EMAIL: "${MUSICME_EMAIL}"
+      MUSICME_PASSWORD: "${MUSICME_PASSWORD}"
+      # Subsonic credentials (what you configure in Music Assistant)
+      SUBSONIC_USER: "${SUBSONIC_USER:-musicme}"
+      SUBSONIC_PASSWORD: "${SUBSONIC_PASSWORD:-musicme}"
+      # Optional
+      PORT: "${PORT:-4533}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
