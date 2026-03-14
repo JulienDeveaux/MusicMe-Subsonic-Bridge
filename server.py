@@ -7,6 +7,7 @@ Designed to be used with Music Assistant's OpenSubsonic provider.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import time
@@ -14,6 +15,9 @@ from typing import Any
 from xml.etree.ElementTree import Element, SubElement, tostring
 
 from aiohttp import web
+
+# Tracks the current request's desired format (set by middleware)
+_request_format: str = "xml"
 
 from musicme_client import MusicMeClient
 
@@ -50,16 +54,45 @@ def subsonic_response(status: str = "ok") -> Element:
 
 
 def error_response(code: int, message: str) -> web.Response:
-    """Return a Subsonic error XML response."""
+    """Return a Subsonic error response."""
     root = subsonic_response("failed")
     err = SubElement(root, "error")
     err.set("code", str(code))
     err.set("message", message)
-    return xml_response(root)
+    return make_response(root)
 
 
-def xml_response(root: Element) -> web.Response:
-    """Serialize an Element tree to an XML web.Response."""
+def _element_to_dict(el: Element) -> dict[str, Any]:
+    """Recursively convert an XML Element to a Subsonic JSON-compatible dict."""
+    result: dict[str, Any] = {}
+    result.update(el.attrib)
+    children: dict[str, list[dict]] = {}
+    for child in el:
+        tag = child.tag
+        child_dict = _element_to_dict(child)
+        if child.text and child.text.strip():
+            child_dict["value"] = child.text.strip()
+        children.setdefault(tag, []).append(child_dict)
+    for tag, items in children.items():
+        if len(items) == 1 and tag not in (
+            "artist", "album", "song", "child", "entry",
+            "index", "playlist", "similarArtist",
+        ):
+            result[tag] = items[0]
+        else:
+            result[tag] = items
+    return result
+
+
+def make_response(root: Element) -> web.Response:
+    """Serialize to XML or JSON depending on the request's 'f' parameter."""
+    if _request_format == "json":
+        data = {"subsonic-response": _element_to_dict(root)}
+        return web.Response(
+            body=json.dumps(data),
+            content_type="application/json",
+            charset="UTF-8",
+        )
     body = b'<?xml version="1.0" encoding="UTF-8"?>\n' + tostring(root, encoding="unicode").encode()
     return web.Response(body=body, content_type="text/xml", charset="UTF-8")
 
@@ -181,7 +214,7 @@ def _track_to_xml(parent: Element, trk: dict[str, Any], tag: str = "song") -> El
 
 async def handle_ping(request: web.Request) -> web.Response:
     """Handle ping.view — connection test."""
-    return xml_response(subsonic_response())
+    return make_response(subsonic_response())
 
 
 async def handle_get_license(request: web.Request) -> web.Response:
@@ -190,14 +223,14 @@ async def handle_get_license(request: web.Request) -> web.Response:
     lic = SubElement(root, "license")
     lic.set("valid", "true")
     lic.set("email", MUSICME_EMAIL)
-    return xml_response(root)
+    return make_response(root)
 
 
 async def handle_get_open_subsonic_extensions(request: web.Request) -> web.Response:
     """Handle getOpenSubsonicExtensions.view."""
     root = subsonic_response()
     SubElement(root, "openSubsonicExtensions")
-    return xml_response(root)
+    return make_response(root)
 
 
 async def handle_get_artists(request: web.Request) -> web.Response:
@@ -223,7 +256,7 @@ async def handle_get_artists(request: web.Request) -> web.Response:
             for art in by_letter[letter]:
                 _artist_to_xml(idx, art)
 
-    return xml_response(root)
+    return make_response(root)
 
 
 async def handle_get_artist(request: web.Request) -> web.Response:
@@ -248,7 +281,7 @@ async def handle_get_artist(request: web.Request) -> web.Response:
         if alb.get("barcode"):
             _album_to_xml(art_el, alb)
 
-    return xml_response(root)
+    return make_response(root)
 
 
 async def handle_get_artist_info2(request: web.Request) -> web.Response:
@@ -271,7 +304,7 @@ async def handle_get_artist_info2(request: web.Request) -> web.Response:
                 sa.set("id", f"{_ART_PREFIX}{rel['id']}")
                 sa.set("name", rel.get("name", ""))
 
-    return xml_response(root)
+    return make_response(root)
 
 
 async def handle_get_album(request: web.Request) -> web.Response:
@@ -294,7 +327,7 @@ async def handle_get_album(request: web.Request) -> web.Response:
             child.set("album", item.get("name", ""))
             child.set("parent", album_id)
 
-    return xml_response(root)
+    return make_response(root)
 
 
 async def handle_get_album_info2(request: web.Request) -> web.Response:
@@ -308,7 +341,7 @@ async def handle_get_album_info2(request: web.Request) -> web.Response:
         item = data["item"]
         if item.get("cover_url"):
             SubElement(info, "largeImageUrl").text = item["cover_url"]
-    return xml_response(root)
+    return make_response(root)
 
 
 async def handle_get_album_list2(request: web.Request) -> web.Response:
@@ -329,7 +362,7 @@ async def handle_get_album_list2(request: web.Request) -> web.Response:
             if alb.get("barcode") and alb.get("streamable", 0) == 2:
                 _album_to_xml(al_el, alb)
 
-    return xml_response(root)
+    return make_response(root)
 
 
 async def handle_get_song(request: web.Request) -> web.Response:
@@ -347,7 +380,7 @@ async def handle_get_song(request: web.Request) -> web.Response:
     for trk in data.get("results", {}).get("tracks", []):
         if trk.get("barcode") == song_id:
             _track_to_xml(root, trk)
-            return xml_response(root)
+            return make_response(root)
 
     return error_response(70, "Song not found")
 
@@ -364,20 +397,20 @@ async def handle_get_top_songs(request: web.Request) -> web.Response:
     ts_el = SubElement(root, "topSongs")
 
     if not artist_name:
-        return xml_response(root)
+        return make_response(root)
 
     search_data = await client.search(artist_name, limit=1)
     if not search_data or "results" not in search_data:
-        return xml_response(root)
+        return make_response(root)
 
     artists = search_data["results"].get("artists", [])
     if not artists:
-        return xml_response(root)
+        return make_response(root)
 
     artist_id = str(artists[0].get("id", ""))
     art_data = await client.get_artist(artist_id, max_albums=5)
     if not art_data:
-        return xml_response(root)
+        return make_response(root)
 
     collected = 0
     for alb in art_data.get("results", {}).get("albums", []):
@@ -396,7 +429,7 @@ async def handle_get_top_songs(request: web.Request) -> web.Response:
                 _track_to_xml(ts_el, trk)
                 collected += 1
 
-    return xml_response(root)
+    return make_response(root)
 
 
 async def handle_search3(request: web.Request) -> web.Response:
@@ -413,12 +446,12 @@ async def handle_search3(request: web.Request) -> web.Response:
     sr = SubElement(root, "searchResult3")
 
     if not query:
-        return xml_response(root)
+        return make_response(root)
 
     limit = max(artist_count, album_count, song_count)
     data = await client.search(query, limit=limit)
     if not data or "results" not in data:
-        return xml_response(root)
+        return make_response(root)
 
     res = data["results"]
     for art in res.get("artists", [])[:artist_count]:
@@ -431,7 +464,7 @@ async def handle_search3(request: web.Request) -> web.Response:
         if trk.get("barcode") and trk.get("streamable"):
             _track_to_xml(sr, trk)
 
-    return xml_response(root)
+    return make_response(root)
 
 
 async def handle_get_playlists(request: web.Request) -> web.Response:
@@ -454,7 +487,7 @@ async def handle_get_playlists(request: web.Request) -> web.Response:
             if item.get("tile_url") or item.get("img_url"):
                 pl.set("coverArt", str(radio_id))
 
-    return xml_response(root)
+    return make_response(root)
 
 
 async def handle_get_playlist(request: web.Request) -> web.Response:
@@ -482,24 +515,24 @@ async def handle_get_playlist(request: web.Request) -> web.Response:
         if trk.get("barcode") and trk.get("streamable", 0) == 2:
             _track_to_xml(pl, trk, tag="entry")
 
-    return xml_response(root)
+    return make_response(root)
 
 
 async def handle_get_starred2(request: web.Request) -> web.Response:
     """Handle getStarred2.view — empty (no favorites API)."""
     root = subsonic_response()
     SubElement(root, "starred2")
-    return xml_response(root)
+    return make_response(root)
 
 
 async def handle_star(request: web.Request) -> web.Response:
     """Handle star.view — no-op."""
-    return xml_response(subsonic_response())
+    return make_response(subsonic_response())
 
 
 async def handle_unstar(request: web.Request) -> web.Response:
     """Handle unstar.view — no-op."""
-    return xml_response(subsonic_response())
+    return make_response(subsonic_response())
 
 
 async def handle_get_cover_art(request: web.Request) -> web.Response:
@@ -544,38 +577,38 @@ async def handle_get_similar_songs(request: web.Request) -> web.Response:
     """Handle getSimilarSongs.view — empty stub."""
     root = subsonic_response()
     SubElement(root, "similarSongs")
-    return xml_response(root)
+    return make_response(root)
 
 
 async def handle_get_bookmarks(request: web.Request) -> web.Response:
     """Handle getBookmarks.view — empty stub."""
     root = subsonic_response()
     SubElement(root, "bookmarks")
-    return xml_response(root)
+    return make_response(root)
 
 
 async def handle_create_bookmark(request: web.Request) -> web.Response:
     """Handle createBookmark.view — no-op stub."""
-    return xml_response(subsonic_response())
+    return make_response(subsonic_response())
 
 
 async def handle_delete_bookmark(request: web.Request) -> web.Response:
     """Handle deleteBookmark.view — no-op stub."""
-    return xml_response(subsonic_response())
+    return make_response(subsonic_response())
 
 
 async def handle_get_podcasts(request: web.Request) -> web.Response:
     """Handle getPodcasts.view — empty."""
     root = subsonic_response()
     SubElement(root, "podcasts")
-    return xml_response(root)
+    return make_response(root)
 
 
 async def handle_get_newest_podcasts(request: web.Request) -> web.Response:
     """Handle getNewestPodcasts.view — empty."""
     root = subsonic_response()
     SubElement(root, "newestPodcasts")
-    return xml_response(root)
+    return make_response(root)
 
 
 # ---------------------------------------------------------------------------
@@ -585,8 +618,10 @@ async def handle_get_newest_podcasts(request: web.Request) -> web.Response:
 
 @web.middleware
 async def auth_middleware(request: web.Request, handler: Any) -> web.Response:
-    """Check Subsonic authentication on all /rest/ endpoints."""
+    """Check Subsonic authentication and detect response format on all /rest/ endpoints."""
+    global _request_format  # noqa: PLW0603
     if request.path.startswith("/rest/"):
+        _request_format = request.query.get("f", "xml")
         if not check_auth(request):
             return error_response(40, "Wrong username or password")
     return await handler(request)
