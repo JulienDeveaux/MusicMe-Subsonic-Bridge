@@ -65,11 +65,14 @@ class MusicMeClient:
         self.session: aiohttp.ClientSession | None = None
         self.user_id: str | None = None
         self.catalog_size: str = "0"
+        self._email: str = ""
+        self._password: str = ""
 
-    async def start(self) -> None:
-        """Create the HTTP session."""
+    def _ensure_session(self) -> aiohttp.ClientSession:
+        """Return the session, creating it if needed."""
         if not self.session or self.session.closed:
             self.session = aiohttp.ClientSession()
+        return self.session
 
     async def close(self) -> None:
         """Close the HTTP session."""
@@ -78,17 +81,18 @@ class MusicMeClient:
 
     async def login(self, email: str, password: str) -> None:
         """Authenticate via web login and extract the userId."""
-        await self.start()
-        assert self.session
+        self._email = email
+        self._password = password
+        session = self._ensure_session()
 
-        async with self.session.post(
+        async with session.post(
             f"{WEB_BASE}/mon-musicme/connexion/",
             data={"email": email, "password": password, "act": "login", "login_cookie": "1"},
             allow_redirects=True,
         ) as resp:
             resp.raise_for_status()
 
-        async with self.session.get(f"{WEB_BASE}/?f=1") as resp:
+        async with session.get(f"{WEB_BASE}/?f=1") as resp:
             resp.raise_for_status()
             raw = await resp.read()
             content = raw.decode("latin-1", errors="replace")
@@ -105,20 +109,30 @@ class MusicMeClient:
 
         logger.info("Logged in to MusicMe (catalog=%s)", self.catalog_size)
 
+    async def _relogin(self) -> None:
+        """Re-authenticate using stored credentials."""
+        if not self._email or not self._password:
+            raise RuntimeError("Cannot re-login: no stored credentials")
+        logger.warning("Session expired, re-authenticating...")
+        await self.login(self._email, self._password)
+
     def _base_params(self) -> str:
         parts = ["format=json", f"partnerid={PARTNER_ID}", f"client={_CLIENT_JSON}"]
         if self.user_id:
             parts.append(f"userid={self.user_id}")
         return "&".join(parts)
 
-    async def api_get(self, endpoint: str) -> dict[str, Any] | None:
-        """GET a dataservice endpoint, decrypt and return JSON."""
-        assert self.session
+    async def api_get(self, endpoint: str, _retried: bool = False) -> dict[str, Any] | None:
+        """GET a dataservice endpoint, decrypt and return JSON.
+
+        Automatically re-authenticates once if the session appears expired.
+        """
+        session = self._ensure_session()
         url = f"{DATASERVICE_BASE}{endpoint}"
         sep = "&" if "?" in url else "?"
         url = f"{url}{sep}{self._base_params()}"
 
-        async with self.session.get(url) as resp:
+        async with session.get(url) as resp:
             if resp.status in (404, 400):
                 return None
             resp.raise_for_status()
@@ -127,7 +141,11 @@ class MusicMeClient:
         try:
             return json.loads(decrypt(raw.strip()))
         except (ValueError, json.JSONDecodeError) as err:
-            logger.warning("Failed to decrypt: %s", err)
+            if not _retried:
+                logger.warning("Decrypt failed (%s), attempting re-login", err)
+                await self._relogin()
+                return await self.api_get(endpoint, _retried=True)
+            logger.warning("Failed to decrypt after re-login: %s", err)
             return None
 
     async def search(self, query: str, limit: int = 20) -> dict[str, Any] | None:

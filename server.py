@@ -151,6 +151,7 @@ def _track_to_xml(parent: Element, trk: dict[str, Any], tag: str = "song") -> El
     if "-" in barcode:
         album_barcode = barcode.split("-")[0]
         el.set("parent", album_barcode)
+        el.set("albumId", album_barcode)
         el.set("coverArt", album_barcode)
     if "_" in barcode and "-" in barcode:
         try:
@@ -313,7 +314,10 @@ async def handle_get_album_info2(request: web.Request) -> web.Response:
 async def handle_get_album_list2(request: web.Request) -> web.Response:
     """Handle getAlbumList2.view — new releases, etc."""
     ltype = request.query.get("type", "newest")
-    size = int(request.query.get("size", "20"))
+    try:
+        size = int(request.query.get("size", "20"))
+    except ValueError:
+        size = 20
 
     root = subsonic_response()
     al_el = SubElement(root, "albumList2")
@@ -351,7 +355,10 @@ async def handle_get_song(request: web.Request) -> web.Response:
 async def handle_get_top_songs(request: web.Request) -> web.Response:
     """Handle getTopSongs.view."""
     artist_name = request.query.get("artist", "")
-    count = int(request.query.get("count", "20"))
+    try:
+        count = int(request.query.get("count", "20"))
+    except ValueError:
+        count = 20
 
     root = subsonic_response()
     ts_el = SubElement(root, "topSongs")
@@ -395,9 +402,12 @@ async def handle_get_top_songs(request: web.Request) -> web.Response:
 async def handle_search3(request: web.Request) -> web.Response:
     """Handle search3.view."""
     query = request.query.get("query", "")
-    artist_count = int(request.query.get("artistCount", "10"))
-    album_count = int(request.query.get("albumCount", "10"))
-    song_count = int(request.query.get("songCount", "10"))
+    try:
+        artist_count = int(request.query.get("artistCount", "10"))
+        album_count = int(request.query.get("albumCount", "10"))
+        song_count = int(request.query.get("songCount", "10"))
+    except ValueError:
+        artist_count = album_count = song_count = 10
 
     root = subsonic_response()
     sr = SubElement(root, "searchResult3")
@@ -506,8 +516,8 @@ async def handle_get_cover_art(request: web.Request) -> web.Response:
     else:
         img_url = f"https://covers-ng2.hosting-media.net/jpg343/u{cover_id}.jpg"
 
-    assert client.session
-    async with client.session.get(img_url) as resp:
+    session = client._ensure_session()
+    async with session.get(img_url) as resp:
         if resp.status != 200:
             return web.Response(status=404)
         data = await resp.read()
