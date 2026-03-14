@@ -62,10 +62,26 @@ def error_response(code: int, message: str) -> web.Response:
     return make_response(root)
 
 
+def _coerce_value(key: str, value: str) -> Any:
+    """Convert string attribute values to native JSON types where appropriate."""
+    if key in ("isDir", "isVideo", "valid", "public", "openSubsonic"):
+        return value.lower() == "true"
+    if key in (
+        "songCount", "duration", "bitRate", "year", "track", "discNumber",
+        "albumCount", "size", "code", "playCount", "userRating",
+    ):
+        try:
+            return int(value)
+        except ValueError:
+            return value
+    return value
+
+
 def _element_to_dict(el: Element) -> dict[str, Any]:
     """Recursively convert an XML Element to a Subsonic JSON-compatible dict."""
     result: dict[str, Any] = {}
-    result.update(el.attrib)
+    for k, v in el.attrib.items():
+        result[k] = _coerce_value(k, v)
     children: dict[str, list[dict]] = {}
     for child in el:
         tag = child.tag
@@ -73,11 +89,14 @@ def _element_to_dict(el: Element) -> dict[str, Any]:
         if child.text and child.text.strip():
             child_dict["value"] = child.text.strip()
         children.setdefault(tag, []).append(child_dict)
+    # Tags that are always arrays in Subsonic JSON (even with 1 element)
+    always_array = {"artist", "album", "song", "child", "entry", "index", "playlist", "similarArtist"}
+    # Tags that are always objects (never arrays) — top-level response wrappers
     for tag, items in children.items():
-        if len(items) == 1 and tag not in (
-            "artist", "album", "song", "child", "entry",
-            "index", "playlist", "similarArtist",
-        ):
+        if el.tag == "subsonic-response":
+            # Top-level children of subsonic-response are always single objects
+            result[tag] = items[0]
+        elif len(items) == 1 and tag not in always_array:
             result[tag] = items[0]
         else:
             result[tag] = items
@@ -159,8 +178,9 @@ def _album_to_xml(parent: Element, alb: dict[str, Any], tag: str = "album") -> E
     el.set("title", alb.get("name", alb.get("title", "")))
     el.set("isDir", "true")
     el.set("coverArt", barcode)
-    el.set("songCount", str(alb.get("ntracks", 0)))
-    el.set("duration", str(alb.get("duration", 0)))
+    el.set("songCount", str(alb.get("ntracks") or 0))
+    el.set("duration", str(alb.get("duration") or 0))
+    el.set("created", alb.get("streetdate", "2000-01-01") + "T00:00:00")
     if alb.get("streetdate"):
         el.set("year", alb["streetdate"][:4])
     artists = alb.get("artists", [])
@@ -179,7 +199,7 @@ def _track_to_xml(parent: Element, trk: dict[str, Any], tag: str = "song") -> El
     el.set("id", barcode)
     el.set("title", trk.get("title", ""))
     el.set("isDir", "false")
-    el.set("duration", str(trk.get("duration", 0)))
+    el.set("duration", str(trk.get("duration") or 0))
     el.set("contentType", "audio/mp4")
     el.set("suffix", "mp4")
     el.set("type", "music")
@@ -266,7 +286,7 @@ async def handle_get_artists(request: web.Request) -> web.Response:
 
 async def handle_get_artist(request: web.Request) -> web.Response:
     """Handle getArtist.view — artist details with albums."""
-    artist_id = request.query.get("id", "").removeprefix(_ART_PREFIX)
+    artist_id = _get_param(request,"id", "").removeprefix(_ART_PREFIX)
     if not artist_id:
         return error_response(10, "Missing id parameter")
 
@@ -291,7 +311,7 @@ async def handle_get_artist(request: web.Request) -> web.Response:
 
 async def handle_get_artist_info2(request: web.Request) -> web.Response:
     """Handle getArtistInfo2.view."""
-    artist_id = request.query.get("id", "").removeprefix(_ART_PREFIX)
+    artist_id = _get_param(request,"id", "").removeprefix(_ART_PREFIX)
     data = await client.get_artist(artist_id) if artist_id else None
 
     root = subsonic_response()
@@ -314,7 +334,7 @@ async def handle_get_artist_info2(request: web.Request) -> web.Response:
 
 async def handle_get_album(request: web.Request) -> web.Response:
     """Handle getAlbum.view — album with tracks."""
-    album_id = request.query.get("id", "")
+    album_id = _get_param(request,"id", "")
     if not album_id:
         return error_response(10, "Missing id parameter")
 
@@ -337,7 +357,7 @@ async def handle_get_album(request: web.Request) -> web.Response:
 
 async def handle_get_album_info2(request: web.Request) -> web.Response:
     """Handle getAlbumInfo2.view."""
-    album_id = request.query.get("id", "")
+    album_id = _get_param(request,"id", "")
     data = await client.get_album(album_id) if album_id else None
 
     root = subsonic_response()
@@ -351,9 +371,9 @@ async def handle_get_album_info2(request: web.Request) -> web.Response:
 
 async def handle_get_album_list2(request: web.Request) -> web.Response:
     """Handle getAlbumList2.view — new releases, etc."""
-    ltype = request.query.get("type", "newest")
+    ltype = _get_param(request,"type", "newest")
     try:
-        size = int(request.query.get("size", "20"))
+        size = int(_get_param(request,"size", "20"))
     except ValueError:
         size = 20
 
@@ -372,7 +392,7 @@ async def handle_get_album_list2(request: web.Request) -> web.Response:
 
 async def handle_get_song(request: web.Request) -> web.Response:
     """Handle getSong.view."""
-    song_id = request.query.get("id", "")
+    song_id = _get_param(request,"id", "")
     if not song_id or "-" not in song_id:
         return error_response(10, "Missing or invalid id parameter")
 
@@ -392,9 +412,9 @@ async def handle_get_song(request: web.Request) -> web.Response:
 
 async def handle_get_top_songs(request: web.Request) -> web.Response:
     """Handle getTopSongs.view."""
-    artist_name = request.query.get("artist", "")
+    artist_name = _get_param(request,"artist", "")
     try:
-        count = int(request.query.get("count", "20"))
+        count = int(_get_param(request,"count", "20"))
     except ValueError:
         count = 20
 
@@ -439,11 +459,11 @@ async def handle_get_top_songs(request: web.Request) -> web.Response:
 
 async def handle_search3(request: web.Request) -> web.Response:
     """Handle search3.view."""
-    query = request.query.get("query", "")
+    query = _get_param(request,"query", "")
     try:
-        artist_count = int(request.query.get("artistCount", "10"))
-        album_count = int(request.query.get("albumCount", "10"))
-        song_count = int(request.query.get("songCount", "10"))
+        artist_count = int(_get_param(request,"artistCount", "10"))
+        album_count = int(_get_param(request,"albumCount", "10"))
+        song_count = int(_get_param(request,"songCount", "10"))
     except ValueError:
         artist_count = album_count = song_count = 10
 
@@ -497,7 +517,7 @@ async def handle_get_playlists(request: web.Request) -> web.Response:
 
 async def handle_get_playlist(request: web.Request) -> web.Response:
     """Handle getPlaylist.view — load radio tracks."""
-    playlist_id = request.query.get("id", "")
+    playlist_id = _get_param(request,"id", "")
     if not playlist_id:
         return error_response(10, "Missing id parameter")
 
@@ -542,7 +562,7 @@ async def handle_unstar(request: web.Request) -> web.Response:
 
 async def handle_get_cover_art(request: web.Request) -> web.Response:
     """Handle getCoverArt.view — proxy cover images from MusicMe CDN."""
-    cover_id = request.query.get("id", "")
+    cover_id = _get_param(request,"id", "")
     if not cover_id:
         return web.Response(status=404)
 
@@ -564,8 +584,8 @@ async def handle_get_cover_art(request: web.Request) -> web.Response:
 
 
 async def handle_stream(request: web.Request) -> web.Response:
-    """Handle stream.view — get a fresh ticket and redirect to the stream URL."""
-    song_id = request.query.get("id", "")
+    """Handle stream.view — proxy the audio stream from MusicMe CDN."""
+    song_id = _get_param(request, "id", "")
     if not song_id:
         return web.Response(status=400, text="Missing id")
 
@@ -573,9 +593,28 @@ async def handle_stream(request: web.Request) -> web.Response:
         stream_url = await client.get_stream_url(song_id)
     except Exception as err:
         logger.error("Stream error for %s: %s", song_id, err)
-        return web.Response(status=500, text=str(err))
+        return web.Response(status=500, text="Stream unavailable")
 
-    raise web.HTTPTemporaryRedirect(location=stream_url)
+    session = client._ensure_session()
+    async with session.get(stream_url) as upstream:
+        if upstream.status != 200:
+            return web.Response(status=502, text="Upstream error")
+
+        response = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": upstream.headers.get("Content-Type", "audio/mp4"),
+            },
+        )
+        if cl := upstream.headers.get("Content-Length"):
+            response.headers["Content-Length"] = cl
+        await response.prepare(request)
+
+        async for chunk in upstream.content.iter_chunked(65536):
+            await response.write(chunk)
+
+        await response.write_eof()
+        return response
 
 
 async def handle_get_similar_songs(request: web.Request) -> web.Response:
@@ -623,7 +662,9 @@ async def handle_get_newest_podcasts(request: web.Request) -> web.Response:
 
 def _get_param(request: web.Request, key: str, default: str = "") -> str:
     """Get a parameter from query string or POST body."""
-    return request.query.get(key, "") or request.get("_post_params", {}).get(key, default)
+    if key in request.query:
+        return request.query[key]
+    return request.get("_post_params", {}).get(key, default)
 
 
 @web.middleware
