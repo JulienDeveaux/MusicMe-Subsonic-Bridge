@@ -5,11 +5,28 @@ A lightweight bridge server that exposes MusicMe's music catalog via the Subsoni
 ## Quick Start
 
 ```bash
-cp .env.example .env
-# Edit .env with your MusicMe credentials
-
-docker compose up -d
+docker run -d --name musicme-bridge \
+  -p 4533:4533 \
+  -e MUSICME_EMAIL="your-email@example.com" \
+  -e MUSICME_PASSWORD="your-password" \
+  ghcr.io/juliendeveaux/musicme-subsonic-bridge:latest
 ```
+
+Or with docker compose, create a `docker-compose.yml`:
+
+```yaml
+services:
+  musicme-bridge:
+    image: ghcr.io/juliendeveaux/musicme-subsonic-bridge:latest
+    restart: unless-stopped
+    ports:
+      - "4533:4533"
+    environment:
+      MUSICME_EMAIL: "your-email@example.com"
+      MUSICME_PASSWORD: "your-password"
+```
+
+Then `docker compose up -d`.
 
 Then in Music Assistant, add an **OpenSubsonic** provider with:
 - **Server**: `http://<your-docker-host>:4533`
