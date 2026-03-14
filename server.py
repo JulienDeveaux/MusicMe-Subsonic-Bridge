@@ -103,21 +103,26 @@ def make_response(root: Element) -> web.Response:
 
 
 def check_auth(request: web.Request) -> bool:
-    """Validate Subsonic authentication from query params."""
-    params = request.query
-    user = params.get("u", "")
+    """Validate Subsonic authentication from query or POST params."""
+    user = _get_param(request, "u")
     if user != SUBSONIC_USER:
         return False
 
     # Method 1: plain password (param "p")
-    if p := params.get("p"):
-        plain = p.removeprefix("enc:")
+    if p := _get_param(request, "p"):
+        if p.startswith("enc:"):
+            try:
+                plain = bytes.fromhex(p[4:]).decode("utf-8")
+            except (ValueError, UnicodeDecodeError):
+                return False
+        else:
+            plain = p
         if plain == SUBSONIC_PASSWORD:
             return True
 
     # Method 2: token + salt (Subsonic 1.13.0+)
-    token = params.get("t", "")
-    salt = params.get("s", "")
+    token = _get_param(request, "t")
+    salt = _get_param(request, "s")
     if token and salt:
         expected = hashlib.md5((SUBSONIC_PASSWORD + salt).encode()).hexdigest()
         return token == expected
@@ -616,12 +621,27 @@ async def handle_get_newest_podcasts(request: web.Request) -> web.Response:
 # ---------------------------------------------------------------------------
 
 
+def _get_param(request: web.Request, key: str, default: str = "") -> str:
+    """Get a parameter from query string or POST body."""
+    return request.query.get(key, "") or request.get("_post_params", {}).get(key, default)
+
+
 @web.middleware
 async def auth_middleware(request: web.Request, handler: Any) -> web.Response:
     """Check Subsonic authentication and detect response format on all /rest/ endpoints."""
     global _request_format  # noqa: PLW0603
     if request.path.startswith("/rest/"):
-        _request_format = request.query.get("f", "xml")
+        # Parse POST body params if present and merge with query for param lookup
+        if request.method == "POST" and request.content_type in (
+            "application/x-www-form-urlencoded", ""
+        ):
+            post_data = await request.post()
+            request["_post_params"] = {k: v for k, v in post_data.items()}
+        else:
+            request["_post_params"] = {}
+
+        # Detect response format: libopensonic always sends f=json
+        _request_format = _get_param(request, "f", "json")
         if not check_auth(request):
             return error_response(40, "Wrong username or password")
     return await handler(request)
